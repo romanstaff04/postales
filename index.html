@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Ruteador Flexible - Edición Punto a Punto</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; display: flex; height: 100vh; font-family: 'Segoe UI', sans-serif; }
+        #sidebar { width: 300px; padding: 20px; background: #2c3e50; color: white; box-shadow: 2px 0 10px rgba(0,0,0,0.3); z-index: 1000; display: flex; flex-direction: column; }
+        #map { flex-grow: 1; }
+        
+        h2 { font-size: 1.3rem; margin-top: 0; color: #3498db; }
+        .btn { width: 100%; padding: 12px; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; margin-bottom: 10px; transition: 0.3s; }
+        
+        .btn-download { background: #27ae60; color: white; display: none; }
+        .btn-download:hover { background: #1e8449; }
+        
+        .btn-undo { background: #f39c12; color: white; display: none; }
+        .btn-undo:hover { background: #d68910; }
+
+        .btn-reset { background: #e74c3c; color: white; margin-top: auto; }
+        
+        .info-box { font-size: 0.85rem; color: #bdc3c7; background: #34495e; padding: 12px; border-radius: 6px; margin: 15px 0; }
+
+        .order-label {
+            background: transparent; border: none; box-shadow: none;
+            color: #2c3e50; font-weight: bold; font-size: 14px;
+            text-shadow: 1px 1px 0px white, -1px -1px 0px white, 1px -1px 0px white, -1px 1px 0px white;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Ruteo Centralizado</h2>
+        <input type="file" id="excel-input" accept=".xlsx, .csv" />
+        
+        <div class="info-box">
+            <b>Tips de edición:</b><br>
+            • Clic en punto naranja: Agrega.<br>
+            • Clic en punto verde: Elimina.<br>
+            • El orden se ajusta solo.
+        </div>
+
+        <button id="btnUndo" class="btn btn-undo" onclick="deshacerUltimo()">↩ Deshacer Último</button>
+        <button id="btnDownload" class="btn btn-download" onclick="descargarExcel()">📥 Descargar Excel</button>
+        
+        <button class="btn btn-reset" onclick="resetearTodo()">Limpiar Todo</button>
+        <p>Paradas: <span id="count">0</span></p>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    
+    <script>
+        const map = L.map('map').setView([-34.6037, -58.3816], 12);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+
+        let puntosCargados = []; // Marcadores en el mapa
+        let rutaSeleccionada = []; // Array de marcadores en orden
+        let lineaRuta = null;
+
+        document.getElementById('excel-input').addEventListener('change', function(e) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                const data = new Uint8Array(event.target.result);
+                const workbook = XLSX.read(data, {type: 'array'});
+                const json = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]]);
+                dibujarPuntosIniciales(json);
+            };
+            reader.readAsArrayBuffer(e.target.files[0]);
+        });
+
+        function dibujarPuntosIniciales(datos) {
+            resetearTodo();
+            const bounds = L.latLngBounds();
+
+            datos.forEach(fila => {
+                const lat = parseFloat(fila.Latitud);
+                const lng = parseFloat(fila.Longitud);
+
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    const marker = L.circleMarker([lat, lng], {
+                        radius: 8,
+                        fillColor: "#ffffff",
+                        color: "#e67e22",
+                        weight: 2,
+                        fillOpacity: 1
+                    }).addTo(map);
+
+                    marker.datosOriginales = fila;
+                    marker.enRuta = false;
+
+                    marker.on('click', function() {
+                        togglePuntoEnRuta(this);
+                    });
+
+                    puntosCargados.push(marker);
+                    bounds.extend([lat, lng]);
+                }
+            });
+            if (puntosCargados.length > 0) map.fitBounds(bounds, {padding: [50, 50]});
+        }
+
+        function togglePuntoEnRuta(marker) {
+            if (!marker.enRuta) {
+                // AGREGAR
+                marker.enRuta = true;
+                rutaSeleccionada.push(marker);
+            } else {
+                // ELIMINAR
+                marker.enRuta = false;
+                marker.setStyle({ color: "#e67e22", weight: 2 });
+                marker.unbindTooltip();
+                
+                const index = rutaSeleccionada.indexOf(marker);
+                if (index > -1) rutaSeleccionada.splice(index, 1);
+            }
+            actualizarGraficos();
+        }
+
+        function deshacerUltimo() {
+            if (rutaSeleccionada.length > 0) {
+                const ultimo = rutaSeleccionada[rutaSeleccionada.length - 1];
+                togglePuntoEnRuta(ultimo);
+            }
+        }
+
+        function actualizarGraficos() {
+            // 1. Limpiar línea previa
+            if (lineaRuta) map.removeLayer(lineaRuta);
+
+            // 2. Re-numerar todos los puntos en ruta
+            const coords = [];
+            rutaSeleccionada.forEach((m, index) => {
+                const num = index + 1;
+                m.setStyle({ color: '#2ecc71', weight: 4 });
+                
+                // Actualizar o crear tooltip
+                m.unbindTooltip();
+                m.bindTooltip(num.toString(), {
+                    permanent: true, 
+                    direction: 'center', 
+                    className: 'order-label'
+                }).openTooltip();
+
+                coords.push(m.getLatLng());
+            });
+
+            // 3. Dibujar línea
+            if (coords.length > 1) {
+                lineaRuta = L.polyline(coords, {color: '#27ae60', weight: 3, dashArray: '5, 10'}).addTo(map);
+            }
+
+            // 4. UI Controles
+            document.getElementById('count').textContent = rutaSeleccionada.length;
+            document.getElementById('btnDownload').style.display = rutaSeleccionada.length > 0 ? 'block' : 'none';
+            document.getElementById('btnUndo').style.display = rutaSeleccionada.length > 0 ? 'block' : 'none';
+        }
+
+        function descargarExcel() {
+            const dataFinal = rutaSeleccionada.map((m, index) => {
+                return {
+                    ...m.datosOriginales,
+                    Orden: index + 1
+                };
+            });
+
+            const ws = XLSX.utils.json_to_sheet(dataFinal);
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Ruta");
+            XLSX.writeFile(wb, `Ruta_Editada_${new Date().getTime()}.xlsx`);
+        }
+
+        function resetearTodo() {
+            puntosCargados.forEach(m => map.removeLayer(m));
+            if (lineaRuta) map.removeLayer(lineaRuta);
+            puntosCargados = [];
+            rutaSeleccionada = [];
+            actualizarGraficos();
+            document.getElementById('excel-input').value = "";
+        }
+    </script>
+</body>
+</html>
